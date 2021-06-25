@@ -1,1 +1,109 @@
+---
+- name: testing when condition
+  gather_facts: false
+  vars:
+    masterserver: "" ## Master Name
+    token: "" ## Enter Token
+    file_path: "/data/netbackup/NetBackup_8.2_CLIENTS2.tar.gz"  ## File Path
+  hosts: localhost
+  tasks:
+    - name: checking space on operating system                        ## Default: it will take the most free size filesytem ##
+      shell: df -k |awk  '{print $4 " " $6}' |sort  -rn |awk 'NR==1'
+      changed_when: false
+      check_mode: no
+      register: space_available
+    
+    - name: Checking space for /usr/openv
+      shell: df -k /usr/ | awk '!/Filesystem/ {print $4}'
+      changed_when: false
+      check_mode: no
+      register: openv_space
 
+    - name: USR_OPENV Space
+      fail:  msg="Not enough space available under /usr/openv/ for installation"
+      when: openv_space.stdout | int < 4*1024*1024      ## max 1.5 GB is needed you can change according to the requirement
+
+    - name: Space not available to copy NB software
+      fail: msg="Not enough space available to copy files, available space = {{space_available.stdout.split(" ")[0] | int /1024}}MB"
+      when: space_available.stdout.split(" ")[0] | int < 7*1024*1024
+
+    - name: Printing Where Space is available 
+      debug:
+        msg: Space is avaiable under {{space_available.stdout.split(" ")[1]}}, hence coping files
+      when: space_available.stdout.split(" ")[0] | int > 7*1024*1024
+    
+    - name: Create directory
+      file:
+        path: '{{space_available.stdout.split(" ")[1]}}/NB'
+        state: directory
+      changed_when: openv_space.stdout | int < 8*1024*1024
+      
+    - name: Copy NB software to clients
+      copy:
+        src: {{file_path}}
+        dest: '{{space_available.stdout.split(" ")[1]}}/NB/'
+      changed_when: space_available.stdout.split(" ")[0] | int < 7*1024*1024
+      check_mode: no
+      register: copied_file
+    
+    - name: untar/unzip the file
+      unarchive:
+        src: '{{copied_file.dest}}'
+        dest: '{{space_available.stdout.split(" ")[1]}}/NB'
+        remote_src: yes
+      register: nbu_untar
+
+    - name: output
+      debug:
+        msg: "{{ nbu_untar.src.split('.tar.gz')[0] | basename }}"
+
+    - name: Installing NB package
+      shell: |
+        set timeout -1
+
+        spawn ./install
+        
+        expect {
+        "Do you wish to continue?" {
+        sleep 1
+        send "y\n"
+        exp_continue
+        }
+        
+        "Do you want to install the NetBackup client software for this client?" {
+        sleep 1
+        send "y\n"
+        exp_continue
+        }
+        "Enter the name of the NetBackup master server :" {
+        sleep 1
+        send "{{masterserver}}\n"
+        exp_continue
+        }
+        
+        "name of the NetBackup client?" {
+        sleep 1
+        send  "y\n"
+        exp_continue
+        }
+        
+        "Is this correct?" {
+        sleep 1
+        send  "y\n"
+        exp_continue
+        }
+        
+        "Enter the authorization token for {{masterserver}} or q to skip:" {
+        sleep 1
+        send "{{token}}\n"
+        exp_continue
+        }
+        }
+      args:
+        executable: expect
+        chdir: "{{space_available.stdout.split(' ')[1]}}/NB/{{nbu_untar.src.split('.tar.gz')[0] | basename}}/"
+
+    - name: Cleanup
+      file: 
+        path: '{{space_available.stdout.split(" ")[1]}}/NB/'
+        state: absent
